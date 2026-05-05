@@ -3,22 +3,22 @@
 import PackageDescription
 
 let package = Package(
-    name: "LCE",
+    name: "SwiftCraft",
     platforms: [
         .macOS(.v26)
     ],
     products: [
         .executable(
-            name: "LCE",
-            targets: ["LCE"]
+            name: "SwiftCraft",
+            targets: ["SwiftCraft"]
         )
     ],
     targets: [
         .executableTarget(
-            name: "LCE",
+            name: "SwiftCraft",
             resources: [
                 .copy("Shaders.metal"),
-                .copy("../../res/terrain.png")
+                .copy("../../res/terrain.png"),
             ]
         )
     ]

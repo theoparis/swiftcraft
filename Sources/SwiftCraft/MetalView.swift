@@ -42,6 +42,13 @@ final class GameView: MTKView {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
         window?.makeFirstResponder(self)
+        // Defer one run-loop tick so SwiftUI finishes configuring the window before we
+        // insert our flags — otherwise SwiftUI overwrites them.
+        DispatchQueue.main.async { [weak self] in
+            guard let window = self?.window else { return }
+            window.styleMask.insert(.resizable)          // required for fullscreen to be enabled
+            window.collectionBehavior.insert(.fullScreenPrimary)
+        }
     }
 
     override func updateTrackingAreas() {
@@ -57,6 +64,10 @@ final class GameView: MTKView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == Key.f11 {
+            window?.toggleFullScreen(nil)
+            return
+        }
         inputHandler?.setKey(event.keyCode, pressed: true)
     }
 

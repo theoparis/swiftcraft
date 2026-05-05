@@ -70,6 +70,7 @@ enum TerrainMesher {
                                     at: worldPos,
                                     block: block,
                                     textures: textures(for: block),
+                                    snapshot: snapshot,
                                     into: &waterVertices
                                 )
                             } else {
@@ -79,6 +80,7 @@ enum TerrainMesher {
                                     at: worldPos,
                                     block: block,
                                     textures: textures(for: block),
+                                    snapshot: snapshot,
                                     into: &opaqueVertices
                                 )
                             }
@@ -96,6 +98,7 @@ enum TerrainMesher {
         at block: SIMD3<Int>,
         block blockType: BlockID,
         textures: BlockTextures,
+        snapshot: WorldMeshSnapshot,
         into vertices: inout [TerrainVertex]
     ) {
         let tile: AtlasTile
@@ -156,13 +159,95 @@ enum TerrainMesher {
 
         let color = tintColor(for: blockType, face: face)
 
-        let shade = face.shade
-        vertices.append(TerrainVertex(position: quad[0], uv: uv[0], color: color, shade: shade))
-        vertices.append(TerrainVertex(position: quad[1], uv: uv[1], color: color, shade: shade))
-        vertices.append(TerrainVertex(position: quad[2], uv: uv[2], color: color, shade: shade))
-        vertices.append(TerrainVertex(position: quad[0], uv: uv[0], color: color, shade: shade))
-        vertices.append(TerrainVertex(position: quad[2], uv: uv[2], color: color, shade: shade))
-        vertices.append(TerrainVertex(position: quad[3], uv: uv[3], color: color, shade: shade))
+        let faceCenter = block &+ face.normal
+        let skyLight: Float = hasSkyAccess(worldX: faceCenter.x, y: faceCenter.y, worldZ: faceCenter.z, in: snapshot) ? 1.0 : 0.15
+
+        // Water gets uniform shading — no AO to keep the surface visually flat.
+        if blockType == .water {
+            let s = face.shade * skyLight
+            vertices.append(contentsOf: [
+                TerrainVertex(position: quad[0], uv: uv[0], color: color, shade: s),
+                TerrainVertex(position: quad[1], uv: uv[1], color: color, shade: s),
+                TerrainVertex(position: quad[2], uv: uv[2], color: color, shade: s),
+                TerrainVertex(position: quad[0], uv: uv[0], color: color, shade: s),
+                TerrainVertex(position: quad[2], uv: uv[2], color: color, shade: s),
+                TerrainVertex(position: quad[3], uv: uv[3], color: color, shade: s),
+            ])
+            return
+        }
+
+        // Ambient occlusion per vertex using the face tangent directions.
+        // Each vertex checks 3 surrounding solid blocks at the face plane for occlusion.
+        let (t1, t2) = faceTangents(face)
+        // Corner signs follow the quad vertex order: [(-1,-1),(+1,-1),(+1,+1),(-1,+1)]
+        let cornerSigns: [(Int, Int)] = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+        var shades = [Float](repeating: 0, count: 4)
+        for i in 0..<4 {
+            let (s1, s2) = cornerSigns[i]
+            let side1 = faceCenter &+ t1 &* s1
+            let side2 = faceCenter &+ t2 &* s2
+            let corner = faceCenter &+ t1 &* s1 &+ t2 &* s2
+            let ao = aoFactor(side1: side1, side2: side2, corner: corner, in: snapshot)
+            shades[i] = face.shade * skyLight * ao
+        }
+
+        // Flip quad diagonal when AO is anisotropic to avoid a dark-corner artifact.
+        let flip = shades[0] + shades[2] < shades[1] + shades[3]
+
+        let qv0 = TerrainVertex(position: quad[0], uv: uv[0], color: color, shade: shades[0])
+        let qv1 = TerrainVertex(position: quad[1], uv: uv[1], color: color, shade: shades[1])
+        let qv2 = TerrainVertex(position: quad[2], uv: uv[2], color: color, shade: shades[2])
+        let qv3 = TerrainVertex(position: quad[3], uv: uv[3], color: color, shade: shades[3])
+
+        if flip {
+            vertices.append(contentsOf: [qv0, qv1, qv3, qv1, qv2, qv3])
+        } else {
+            vertices.append(contentsOf: [qv0, qv1, qv2, qv0, qv2, qv3])
+        }
+    }
+
+    // Tangent axes for each face. Combined with corner signs [(-1,-1),(+1,-1),(+1,+1),(-1,+1)]
+    // they identify the three AO-neighbor blocks around each quad vertex.
+    private static func faceTangents(_ face: BlockFace) -> (SIMD3<Int>, SIMD3<Int>) {
+        switch face {
+        case .north:  return (SIMD3( 1, 0,  0), SIMD3(0, 1, 0))
+        case .south:  return (SIMD3(-1, 0,  0), SIMD3(0, 1, 0))
+        case .east:   return (SIMD3( 0, 0,  1), SIMD3(0, 1, 0))
+        case .west:   return (SIMD3( 0, 0, -1), SIMD3(0, 1, 0))
+        case .top:    return (SIMD3( 1, 0,  0), SIMD3(0, 0, 1))
+        case .bottom: return (SIMD3( 1, 0,  0), SIMD3(0, 0,-1))
+        }
+    }
+
+    private static func hasSkyAccess(worldX: Int, y: Int, worldZ: Int, in snapshot: WorldMeshSnapshot) -> Bool {
+        guard y < Chunk.sizeY - 1 else { return true }
+        guard y >= 0 else { return false }
+        for checkY in (y + 1)..<Chunk.sizeY {
+            let block = snapshot.blockAt(worldX: worldX, y: checkY, worldZ: worldZ)
+            if block != .air && block != .water && block != .leaves {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func aoFactor(side1: SIMD3<Int>, side2: SIMD3<Int>, corner: SIMD3<Int>, in snapshot: WorldMeshSnapshot) -> Float {
+        let s1 = isSolidForAO(side1, in: snapshot) ? 1 : 0
+        let s2 = isSolidForAO(side2, in: snapshot) ? 1 : 0
+        // When both sides are solid the corner is fully occluded regardless.
+        let c = (s1 == 1 && s2 == 1) ? 1 : (isSolidForAO(corner, in: snapshot) ? 1 : 0)
+        let level = 3 - s1 - s2 - c   // 0 = darkest, 3 = brightest
+        switch level {
+        case 0:  return 0.50
+        case 1:  return 0.70
+        case 2:  return 0.85
+        default: return 1.00
+        }
+    }
+
+    private static func isSolidForAO(_ pos: SIMD3<Int>, in snapshot: WorldMeshSnapshot) -> Bool {
+        let block = snapshot.blockAt(worldX: pos.x, y: pos.y, worldZ: pos.z)
+        return block != .air && block != .water
     }
 
     private static func textures(for block: BlockID) -> BlockTextures {

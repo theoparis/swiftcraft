@@ -58,13 +58,15 @@ fragment float4 waterFragment(
     sampler atlasSampler [[sampler(0)]]
 ) {
     float4 albedo = atlas.sample(atlasSampler, in.uv);
-    float3 tinted = albedo.rgb * float3(0.7, 0.9, 1.1) * in.shade;
-    float alpha = 0.62;
+    // Beta 1.8.1 water: muted deep blue, mostly solid colour with subtle texture detail.
+    float3 baseBlue = float3(0.24, 0.46, 0.94);
+    float3 tinted = mix(albedo.rgb * float3(0.4, 0.6, 1.1), baseBlue, 0.65) * in.shade;
+    float alpha = 0.80;
     if (uniforms.underwater > 0.5) {
         float distanceToCamera = distance(in.worldPosition, uniforms.cameraPosition);
         float fog = clamp(distanceToCamera / 20.0, 0.0, 1.0);
-        tinted = mix(tinted, float3(0.03, 0.25, 0.34), fog);
-        alpha = 0.35;
+        tinted = mix(tinted, float3(0.03, 0.18, 0.38), fog);
+        alpha = 0.40;
     }
     return float4(tinted, alpha);
 }

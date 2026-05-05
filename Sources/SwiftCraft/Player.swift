@@ -48,7 +48,6 @@ final class PlayerController {
 
         let hasMoveInput = simd_length_squared(moveAxis) > 0.0001
         isSwimming = intersectsWater(at: position, world: world)
-        let feetInWater = intersectsWater(at: position + float3(0, 0.05, 0), world: world)
         let headInWater = world.isWater(
             worldX: Int(floor(eyePosition.x)),
             y: Int(floor(eyePosition.y)),
@@ -56,40 +55,76 @@ final class PlayerController {
         )
         let jumpPressed = input.isPressed(Key.space)
         let jumpJustPressed = jumpPressed && !wasJumpPressed
-        let walkSpeed: Float = isSwimming ? 3.0 : (input.isPressed(Key.leftShift) ? 8.5 : 5.0)
-        let acceleration: Float = isSwimming ? 10 : (isGrounded ? 22 : 8)
-        let friction: Float = isSwimming ? 5 : (isGrounded ? 12 : 1.5)
-
-        if hasMoveInput {
-            moveAxis = simd_normalize(moveAxis)
-            let targetVelocity = moveAxis * walkSpeed
-            velocity.x = approach(velocity.x, targetVelocity.x, acceleration * dt)
-            velocity.z = approach(velocity.z, targetVelocity.z, acceleration * dt)
-        } else {
-            velocity.x = approach(velocity.x, 0, friction * dt)
-            velocity.z = approach(velocity.z, 0, friction * dt)
-        }
+        let isSprinting = input.isPressed(Key.leftShift)
 
         if isSwimming {
-            if jumpPressed {
-                if jumpJustPressed && feetInWater && !headInWater {
-                    velocity.y = max(velocity.y, 6.75)
-                } else {
-                    velocity.y = approach(velocity.y, 4.5, 18 * dt)
-                }
-            } else {
-                velocity.y = approach(velocity.y, 0, 6 * dt)
+            // Water: friction-impulse with sluggish horizontal movement (~2 m/s swim speed).
+            // Decay rate 6/s → equilibrium speed = pushAccel / decayRate.
+            let hDecay: Float = 6.0
+            let hFriction = exp(-hDecay * dt)
+            velocity.x *= hFriction
+            velocity.z *= hFriction
+            if hasMoveInput {
+                let dir = simd_normalize(moveAxis)
+                let pushAccel: Float = 2.0 * hDecay  // equilibrium 2.0 m/s
+                velocity.x += dir.x * pushAccel * dt
+                velocity.z += dir.z * pushAccel * dt
             }
-            velocity.y -= 7.5 * dt
-            velocity.y = max(velocity.y, -5.5)
+
+            // At the water surface (head above water), space jumps out like on land.
+            if jumpJustPressed && !headInWater {
+                velocity.y = 9.5
+            } else {
+                let vDecay: Float = 3.5
+                velocity.y *= exp(-vDecay * dt)
+
+                if headInWater {
+                    // Submerged: apply gentle sink and allow swimming up.
+                    velocity.y -= 5.0 * dt
+                    if jumpPressed {
+                        let swimUp: Float = 3.0 * vDecay
+                        if velocity.y < 3.0 { velocity.y += swimUp * dt }
+                    }
+                }
+                // At the surface (!headInWater): only drag runs, no sink and no swim-up.
+                // This lets the player float without oscillating between water and air physics.
+
+                velocity.y = max(velocity.y, -4.0)
+            }
+
         } else {
-            if isGrounded && jumpPressed {
-                velocity.y = 6.75
+            // Ground / air: Beta 1.8.1 friction-impulse model.
+            // Friction decay rates: ground ~12/s (snappy), air ~1/s (momentum preserved).
+            let hDecay: Float = isGrounded ? 12.0 : 1.0
+            let hFriction = exp(-hDecay * dt)
+            velocity.x *= hFriction
+            velocity.z *= hFriction
+
+            if hasMoveInput {
+                let dir = simd_normalize(moveAxis)
+                let pushAccel: Float
+                if isGrounded {
+                    // Walk 4.3 m/s, sprint 5.6 m/s (Beta 1.8.1 exact values).
+                    let targetSpeed: Float = isSprinting ? 5.6 : 4.3
+                    pushAccel = targetSpeed * hDecay
+                } else {
+                    // Air control: equilibrium ≈ walk speed so momentum is mostly preserved.
+                    pushAccel = 4.3 * hDecay
+                }
+                velocity.x += dir.x * pushAccel * dt
+                velocity.z += dir.z * pushAccel * dt
+            }
+
+            // Jump: 0.42 b/tick * 20 tps = 8.4, tuned up slightly for reliable 1-block clearing.
+            if isGrounded && jumpJustPressed {
+                velocity.y = 9.5
                 isGrounded = false
             }
 
-            velocity.y -= 20 * dt
-            velocity.y = max(velocity.y, -40)
+            // Gravity + air drag on Y axis matching Beta's 0.08 grav / 0.98 drag per tick.
+            velocity.y -= 32.0 * dt
+            velocity.y *= exp(-0.404 * dt)  // pow(0.98, 20) per second
+            velocity.y = max(velocity.y, -50.0)
         }
 
         moveAndCollide(deltaTime: dt, world: world)
@@ -99,10 +134,37 @@ final class PlayerController {
     private func moveAndCollide(deltaTime dt: Float, world: VoxelWorld) {
         isGrounded = false
 
+        // Save deltas before sweepAxis can zero the velocities.
+        let dx = velocity.x * dt
+        let dz = velocity.z * dt
+
         var pos = position
-        pos.x = sweepAxis(position: pos, delta: velocity.x * dt, axis: 0, world: world)
+        pos.x = sweepAxis(position: pos, delta: dx, axis: 0, world: world)
         pos.y = sweepAxis(position: pos, delta: velocity.y * dt, axis: 1, world: world)
-        pos.z = sweepAxis(position: pos, delta: velocity.z * dt, axis: 2, world: world)
+        pos.z = sweepAxis(position: pos, delta: dz, axis: 2, world: world)
+
+        // Auto-step: when grounded and walking into a ledge ≤ 0.5 blocks tall, step up.
+        let xBlocked = abs(dx) > 0.001 && pos.x == position.x
+        let zBlocked = abs(dz) > 0.001 && pos.z == position.z
+        if isGrounded && (xBlocked || zBlocked) {
+            let stepH: Float = 0.5
+            var sp = float3(position.x, position.y + stepH, position.z)
+            if !collides(at: sp, world: world) {
+                var moved = false
+                if xBlocked { var tx = sp; tx.x += dx; if !collides(at: tx, world: world) { sp.x = tx.x; moved = true } }
+                if zBlocked { var tz = sp; tz.z += dz; if !collides(at: tz, world: world) { sp.z = tz.z; moved = true } }
+                if moved {
+                    // Snap back down to the ledge surface.
+                    var sd = sp; sd.y -= stepH
+                    sp.y = collides(at: sd, world: world) ? sp.y : sd.y
+                    isGrounded = true
+                    velocity.x = dx / dt
+                    velocity.z = dz / dt
+                    pos = sp
+                }
+            }
+        }
+
         position = pos
     }
 
@@ -114,10 +176,10 @@ final class PlayerController {
             if axis == 1 {
                 if delta < 0 { isGrounded = true }
                 velocity.y = 0
-            } else if axis == 0 {
-                velocity.x = 0
-            } else {
-                velocity.z = 0
+            } else if isGrounded {
+                // Only kill horizontal velocity when grounded. In the air, momentum is
+                // preserved so the player can still jump over the wall they just touched.
+                if axis == 0 { velocity.x = 0 } else { velocity.z = 0 }
             }
             return position[axis]
         }

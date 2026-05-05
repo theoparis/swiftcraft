@@ -77,4 +77,5 @@ enum Key {
     static let d: UInt16 = 2
     static let space: UInt16 = 49
     static let leftShift: UInt16 = 56
+    static let f11: UInt16 = 103
 }

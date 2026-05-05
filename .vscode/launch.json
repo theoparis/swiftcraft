@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:swiftcraft}",
+            "name": "Debug LCE",
+            "target": "LCE",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug LCE"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:swiftcraft}",
+            "name": "Release LCE",
+            "target": "LCE",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release LCE"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:swiftcraft}",
+            "name": "Debug SwiftCraft",
+            "target": "SwiftCraft",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SwiftCraft"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:swiftcraft}",
+            "name": "Release SwiftCraft",
+            "target": "SwiftCraft",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SwiftCraft"
+        }
+    ]
+}
